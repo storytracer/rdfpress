@@ -243,6 +243,9 @@ def iter_xml_from_zip(
 # Parallel processing workers
 # ---------------------------------------------------------------------------
 
+_CHUNK_SIZE = 100  # entries per worker task — balances IPC overhead vs utilisation
+
+
 def _init_worker():
     """Silence noisy rdflib warnings in worker processes."""
     logging.getLogger("rdflib.term").setLevel(logging.ERROR)
@@ -261,73 +264,134 @@ def _parse_one(
         return (name, None, f"{name} — {e}")
 
 
-def _process_zip_to_jsonl(
-    zip_path: str, output_path: str, jsonld: bool, pattern: str,
-) -> tuple[str, int, int, list[str]]:
-    """Worker: convert one zip archive to one .jsonl.gz file.
+def _parse_chunk(
+    zip_path: str, entry_names: list[str], jsonld: bool,
+) -> list[tuple[str, str | None, str | None]]:
+    """Worker: open a zip, read + parse a chunk of entries.
 
-    Returns (zip_name, success_count, fail_count, error_messages).
+    Each worker opens the zip independently so no bytes are pickled across
+    process boundaries.  Returns [(source_name, json_line | None, error | None), ...].
     """
-    zp = Path(zip_path)
-    entries = list(iter_xml_from_zip(zp, pattern))
-    errors: list[str] = []
-    success, failed = 0, 0
-
-    with gzip.open(output_path, "wt", encoding="utf-8", compresslevel=6) as gz:
-        for name, source in entries:
+    results: list[tuple[str, str | None, str | None]] = []
+    with zipfile.ZipFile(zip_path, "r") as zf:
+        for entry_name in entry_names:
+            source_name = Path(entry_name).name
             try:
-                data = parse_rdfxml(source, jsonld=jsonld)
-                data["_source_file"] = name
-                gz.write(json.dumps(data, ensure_ascii=False, separators=(",", ":")))
-                gz.write("\n")
-                success += 1
+                xml_bytes = zf.read(entry_name)
+                data = parse_rdfxml(xml_bytes, jsonld=jsonld)
+                data["_source_file"] = source_name
+                line = json.dumps(data, ensure_ascii=False, separators=(",", ":"))
+                results.append((source_name, line, None))
             except Exception as e:
-                errors.append(f"{name} — {e}")
-                failed += 1
-
-    return (zp.name, success, failed, errors)
+                results.append((source_name, None, f"{source_name} — {e}"))
+    return results
 
 
 # ---------------------------------------------------------------------------
 # Batch helpers
 # ---------------------------------------------------------------------------
 
-def _batch_multi_zip(
-    src: Path, zip_files: list[Path], output: str | None,
+def _batch_from_zips(
+    zip_outputs: list[tuple[Path, Path]],
     jsonld: bool, pattern: str, workers: int,
 ):
-    """Process a directory of zip files — one .jsonl.gz per zip."""
-    out_dir = Path(output) if output else src
-    out_dir.mkdir(parents=True, exist_ok=True)
+    """Process one or more zip files with fine-grained chunk-based parallelism.
 
-    tasks = [
-        (str(zf), str(out_dir / zf.with_suffix(".jsonl.gz").name), jsonld, pattern)
-        for zf in zip_files
-    ]
-    pool_size = min(workers, len(tasks))
-    total_ok, total_fail = 0, 0
+    *zip_outputs* is a list of (zip_path, output_path) pairs.  Each zip
+    produces its own .jsonl.gz.  XML entries from **all** zips are chunked
+    and distributed across workers so every core stays busy regardless of
+    individual zip sizes.
+    """
+    suffix = pattern.replace("*", "")  # e.g. "*.xml" -> ".xml"
 
-    if pool_size <= 1:
-        for args in tqdm(tasks, desc="Processing zips", unit="zip"):
-            zip_name, ok, fail, errors = _process_zip_to_jsonl(*args)
-            for e in errors:
-                tqdm.write(f"  FAILED: {e}")
-            total_ok += ok
-            total_fail += fail
+    # --- 1. Enumerate entries (central-directory only, no decompression) ---
+    # chunks: [(zip_path_str, output_path_str, [entry_name, …]), …]
+    chunks: list[tuple[str, str, list[str]]] = []
+    total_files = 0
+
+    for zp, out in zip_outputs:
+        out.parent.mkdir(parents=True, exist_ok=True)
+        with zipfile.ZipFile(zp, "r") as zf:
+            members = sorted(
+                n for n in zf.namelist()
+                if n.endswith(suffix) and not n.startswith("__MACOSX")
+            )
+        total_files += len(members)
+        zp_str, out_str = str(zp), str(out)
+        for i in range(0, len(members), _CHUNK_SIZE):
+            chunks.append((zp_str, out_str, members[i : i + _CHUNK_SIZE]))
+
+    if total_files == 0:
+        click.echo("No matching files found in the provided zip(s).", err=True)
+        sys.exit(1)
+
+    # --- 2. Process chunks in parallel ---
+    pool_size = min(workers, len(chunks))
+    # keyed by output path → {ok, fail}
+    stats: dict[str, dict[str, int]] = {
+        str(out): {"ok": 0, "fail": 0} for _, out in zip_outputs
+    }
+    gz_handles: dict[str, gzip.GzipFile] = {}
+
+    try:
+        for _, out in zip_outputs:
+            gz_handles[str(out)] = gzip.open(
+                str(out), "wt", encoding="utf-8", compresslevel=6,
+            )
+
+        if pool_size <= 1:
+            # Sequential
+            for zp_str, out_str, names in tqdm(chunks, desc="Converting", unit="chunk"):
+                results = _parse_chunk(zp_str, names, jsonld)
+                gz = gz_handles[out_str]
+                for _name, line, error in results:
+                    if line is not None:
+                        gz.write(line)
+                        gz.write("\n")
+                        stats[out_str]["ok"] += 1
+                    else:
+                        tqdm.write(f"  FAILED: {error}")
+                        stats[out_str]["fail"] += 1
+        else:
+            with ProcessPoolExecutor(max_workers=pool_size, initializer=_init_worker) as pool:
+                futures = {
+                    pool.submit(_parse_chunk, zp_str, names, jsonld): out_str
+                    for zp_str, out_str, names in chunks
+                }
+                with tqdm(total=total_files, desc="Converting", unit="file") as pbar:
+                    for fut in as_completed(futures):
+                        out_str = futures[fut]
+                        results = fut.result()
+                        gz = gz_handles[out_str]
+                        for _name, line, error in results:
+                            if line is not None:
+                                gz.write(line)
+                                gz.write("\n")
+                                stats[out_str]["ok"] += 1
+                            else:
+                                tqdm.write(f"  FAILED: {error}")
+                                stats[out_str]["fail"] += 1
+                        pbar.update(len(results))
+    finally:
+        for gz in gz_handles.values():
+            gz.close()
+
+    # --- 3. Report ---
+    total_ok = sum(s["ok"] for s in stats.values())
+    total_fail = sum(s["fail"] for s in stats.values())
+    n_zips = len(zip_outputs)
+
+    if n_zips == 1:
+        out_path = str(zip_outputs[0][1])
+        click.echo(f"\nWrote {out_path}")
+        click.echo(f"  {total_ok} converted, {total_fail} failed out of {total_files} files.")
+        if total_ok > 0:
+            size_mb = Path(out_path).stat().st_size / (1024 * 1024)
+            click.echo(f"  File size: {size_mb:.1f} MB")
     else:
-        with ProcessPoolExecutor(max_workers=pool_size, initializer=_init_worker) as pool:
-            futures = {pool.submit(_process_zip_to_jsonl, *a): a for a in tasks}
-            with tqdm(total=len(futures), desc="Processing zips", unit="zip") as pbar:
-                for fut in as_completed(futures):
-                    zip_name, ok, fail, errors = fut.result()
-                    for e in errors:
-                        tqdm.write(f"  FAILED: {e}")
-                    total_ok += ok
-                    total_fail += fail
-                    pbar.update(1)
-
-    click.echo(f"\nWrote {len(zip_files)} .jsonl.gz files to {out_dir}")
-    click.echo(f"  {total_ok} records converted, {total_fail} failed across {len(zip_files)} zip files.")
+        out_dir = zip_outputs[0][1].parent
+        click.echo(f"\nWrote {n_zips} .jsonl.gz files to {out_dir}")
+        click.echo(f"  {total_ok} records converted, {total_fail} failed across {n_zips} zip files.")
 
 
 def _batch_single(
@@ -430,7 +494,13 @@ def batch(input_path: str, output: str | None, jsonld: bool, pattern: str, worke
         entries = list(iter_xml_from_dir(src, pattern))
 
         if not entries and zip_files:
-            _batch_multi_zip(src, zip_files, output, jsonld, pattern, workers)
+            # Multi-zip mode — one .jsonl.gz per zip
+            out_dir = Path(output) if output else src
+            zip_outputs = [
+                (zf, out_dir / zf.with_suffix(".jsonl.gz").name)
+                for zf in zip_files
+            ]
+            _batch_from_zips(zip_outputs, jsonld, pattern, workers)
             return
 
         if not entries:
@@ -440,23 +510,21 @@ def batch(input_path: str, output: str | None, jsonld: bool, pattern: str, worke
             )
             sys.exit(1)
 
-        source_label = str(src)
+        # Directory of XML files — use _batch_single (paths are cheap to pickle)
+        if output is None:
+            output = str(src.with_suffix(".jsonl.gz"))
+        _batch_single(entries, output, jsonld, workers)
+        return
 
     elif src.is_file() and zipfile.is_zipfile(src):
-        entries = list(iter_xml_from_zip(src, pattern))
-        source_label = f"zip:{src.name}"
-    else:
-        click.echo(f"Error: {input_path} is not a directory or zip file.", err=True)
-        sys.exit(1)
+        # Single zip — route through chunk-based parallel processing
+        if output is None:
+            output = str(src.with_suffix(".jsonl.gz"))
+        _batch_from_zips([(src, Path(output))], jsonld, pattern, workers)
+        return
 
-    if not entries:
-        click.echo(f"No files matching '{pattern}' in {source_label}", err=True)
-        sys.exit(1)
-
-    if output is None:
-        output = str(src.with_suffix(".jsonl.gz"))
-
-    _batch_single(entries, output, jsonld, workers)
+    click.echo(f"Error: {input_path} is not a directory or zip file.", err=True)
+    sys.exit(1)
 
 
 if __name__ == "__main__":
