@@ -185,7 +185,7 @@ def rekey_by_type(data: dict) -> dict:
 
     for type_key, nodes in grouped.items():
         nodes = [simplify_node(n) for n in nodes]
-        result[type_key] = nodes[0] if len(nodes) == 1 else nodes
+        result[type_key] = nodes
 
     return result
 
