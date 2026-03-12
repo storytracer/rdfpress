@@ -976,13 +976,13 @@ def single(input_file: str, output: str | None, jsonld: bool):
               help="Comma-separated output formats: jsonl, jsonl.gz, parquet. [default: jsonl.gz]")
 @click.option("--jsonld", is_flag=True, help="Output valid JSON-LD instead of simplified JSON.")
 @click.option("--glob", "pattern", type=str, default="*.xml", help="File glob pattern. [default: *.xml]")
-@click.option("-w", "--workers", type=int, default=None, help="Parallel workers. [default: number of CPUs]")
+@click.option("-w", "--workers", type=int, default=None, help="Parallel workers. [default: half of CPUs]")
 @click.option("--compresslevel", type=click.IntRange(0, 9), default=6, help="Gzip compression level (0=none, 9=max). [default: 6]")
 @click.option("--resume", is_flag=True, default=True, help="Skip zips whose output already exists.")
 @click.option("--cache-dir", type=click.Path(), default=None,
               help="Cache directory for remote downloads. [default: <output>/.cache]")
-@click.option("--block-size", type=str, default="8MB",
-              help="Read buffer size for remote transfers (e.g. 1MB, 8MB, 64KB). [default: 8MB]")
+@click.option("--block-size", type=str, default="16MB",
+              help="Read buffer size for remote transfers (e.g. 1MB, 16MB, 64KB). [default: 16MB]")
 def batch(input_path: str, output: str | None, formats: str, jsonld: bool,
           pattern: str, workers: int, compresslevel: int, resume: bool,
           cache_dir: str | None, block_size: str):
@@ -1004,7 +1004,7 @@ def batch(input_path: str, output: str | None, formats: str, jsonld: bool,
 
     Use --jsonld for standards-compliant JSON-LD output.
     """
-    workers = max(1, workers if workers is not None else os.cpu_count() or 4)
+    workers = max(1, workers if workers is not None else (os.cpu_count() or 4) // 2)
     block_size_bytes = humanfriendly.parse_size(block_size, binary=True)
 
     # --- Parse and validate formats ---
