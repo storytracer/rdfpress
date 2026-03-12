@@ -61,6 +61,7 @@ import orjson
 import logging
 import shutil
 import sys
+import time
 import zipfile
 from io import BytesIO
 from pathlib import Path
@@ -324,6 +325,7 @@ class ZipRow:
     stem: str
     ok: int = 0
     fail: int = 0
+    elapsed: float = 0.0     # wall-clock seconds for this zip
     produced: dict[str, Path] = dataclasses.field(default_factory=dict)
     errors: list[str] = dataclasses.field(default_factory=list)
     status: str = "ok"       # "ok" | "skip" | "error"
@@ -364,13 +366,14 @@ def _print_batch_report(stats: BatchStats, formats: list[str]) -> None:
 
     if ok_rows:
         table = Table(
-            show_header=True, header_style="bold", box=None,
+            show_header=True, header_style="bold cyan", box=None,
             pad_edge=False, padding=(0, 2),
         )
         table.add_column("Zip")
         table.add_column("Records", justify="right")
         for fmt in formats:
             table.add_column(fmt, justify="right")
+        table.add_column("Time", justify="right")
         table.add_column("Errors", justify="right")
 
         for r in ok_rows:
@@ -381,8 +384,41 @@ def _print_batch_report(stats: BatchStats, formats: list[str]) -> None:
                     sizes.append(f"{mb:.1f} MB")
                 else:
                     sizes.append("–")
+            secs = r.elapsed
+            if secs < 60:
+                time_cell = f"{secs:.1f}s"
+            else:
+                m, s = divmod(int(secs), 60)
+                time_cell = f"{m}m{s:02d}s"
             err_cell = f"[red]{r.fail:,}[/]" if r.fail else "[dim]–[/]"
-            table.add_row(r.stem, f"{r.ok:,}", *sizes, err_cell)
+            table.add_row(r.stem, f"{r.ok:,}", *sizes, time_cell, err_cell)
+
+        if len(ok_rows) > 1:
+            total_ok = sum(r.ok for r in ok_rows)
+            total_fail = sum(r.fail for r in ok_rows)
+            total_secs = sum(r.elapsed for r in ok_rows)
+            total_sizes = []
+            for fmt in formats:
+                total_mb = sum(
+                    r.produced[fmt].stat().st_size / (1024 * 1024)
+                    for r in ok_rows
+                    if fmt in r.produced and r.produced[fmt].exists()
+                )
+                total_sizes.append(f"{total_mb:.1f} MB")
+            if total_secs < 60:
+                total_time = f"{total_secs:.1f}s"
+            else:
+                m, s = divmod(int(total_secs), 60)
+                total_time = f"{m}m{s:02d}s"
+            total_err = (
+                f"[red]{total_fail:,}[/]" if total_fail else "[dim]–[/]"
+            )
+            table.add_section()
+            table.add_row(
+                "[bold cyan]Total[/]", f"[bold cyan]{total_ok:,}[/]",
+                *[f"[bold cyan]{s}[/]" for s in total_sizes],
+                f"[bold cyan]{total_time}[/]", total_err,
+            )
 
         console.print()
         console.print(table)
@@ -523,6 +559,7 @@ def _batch_from_zips(
             current_tmp = tmp_path
             row = ZipRow(stem=stem)
             zp_str = str(zp)
+            t0 = time.monotonic()
 
             try:
                 with open(tmp_path, "w", encoding="utf-8") as f:
@@ -589,6 +626,7 @@ def _batch_from_zips(
                     jsonl_path, stem, out_dir, formats, compresslevel,
                 )
                 jsonl_path.unlink()
+                row.elapsed = time.monotonic() - t0
 
             except Exception as exc:
                 if tmp_path.exists():
@@ -599,6 +637,7 @@ def _batch_from_zips(
                 stats.skipped_bad += 1
                 row.status = "error"
                 row.reason = str(exc)
+                row.elapsed = time.monotonic() - t0
                 stats.rows.append(row)
                 continue
 
