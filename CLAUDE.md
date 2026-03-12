@@ -4,17 +4,17 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project overview
 
-Single-file Python CLI tool (`rdfxml2jsonl.py`) that bulk-converts RDF/XML files to queryable JSONL or standards-compliant JSON-LD using rdflib. Uses Click for CLI, tqdm for progress, and `ProcessPoolExecutor` for parallelism.
+Single-file Python CLI tool (`rdfpress.py`) that bulk-converts RDF/XML files to queryable JSONL or standards-compliant JSON-LD using rdflib. Uses Click for CLI, tqdm for progress, and `ProcessPoolExecutor` for parallelism.
 
 ## Running
 
 Requires [uv](https://docs.astral.sh/uv/) — no manual dependency installation needed:
 
 ```bash
-uv run rdfxml2jsonl.py single input.xml           # single file → simplified JSON
-uv run rdfxml2jsonl.py single input.xml --jsonld   # single file → JSON-LD
-uv run rdfxml2jsonl.py batch input_dir/ -o out.jsonl.gz        # directory/zip → gzipped JSONL
-uv run rdfxml2jsonl.py batch zip_folder/ -o out_dir/ -w 8      # folder of zips, 8 workers
+uv run rdfpress.py single input.xml           # single file → simplified JSON
+uv run rdfpress.py single input.xml --jsonld   # single file → JSON-LD
+uv run rdfpress.py batch input_dir/ -o out.jsonl.gz        # directory/zip → gzipped JSONL
+uv run rdfpress.py batch zip_folder/ -o out_dir/ -w 8      # folder of zips, 8 workers
 ```
 
 ## Architecture

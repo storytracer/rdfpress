@@ -1,4 +1,4 @@
-# rdfxml2jsonl
+# rdfpress
 
 Bulk-convert RDF/XML files to queryable JSONL or standards-compliant JSON-LD.
 
@@ -11,32 +11,32 @@ Requires [uv](https://docs.astral.sh/uv/). No manual dependency installation nee
 Alternatively, install as a package for library or CLI use:
 
 ```bash
-pip install git+https://github.com/youruser/rdfxml2jsonl.git
+pip install git+https://github.com/youruser/rdfpress.git
 ```
 
 ## Quick start
 
 ```bash
 # Single file → simplified JSON
-uv run rdfxml2jsonl.py single input.xml
+uv run rdfpress.py single input.xml
 
 # Single file → valid JSON-LD
-uv run rdfxml2jsonl.py single input.xml --jsonld
+uv run rdfpress.py single input.xml --jsonld
 
 # Directory of files → gzipped JSONL
-uv run rdfxml2jsonl.py batch input_dir/ -o output.jsonl.gz
+uv run rdfpress.py batch input_dir/ -o output.jsonl.gz
 
 # Zip archive → gzipped JSONL
-uv run rdfxml2jsonl.py batch archive.zip -o output.jsonl.gz
+uv run rdfpress.py batch archive.zip -o output.jsonl.gz
 
 # Folder of zip archives → one .jsonl.gz per zip
-uv run rdfxml2jsonl.py batch zip_folder/ -o out_dir/
+uv run rdfpress.py batch zip_folder/ -o out_dir/
 
 # Use 8 parallel workers (default: 4)
-uv run rdfxml2jsonl.py batch zip_folder/ -o out_dir/ -w 8
+uv run rdfpress.py batch zip_folder/ -o out_dir/ -w 8
 
 # Resume after interruption (skips already-completed zips)
-uv run rdfxml2jsonl.py batch zip_folder/ -o out_dir/ --resume
+uv run rdfpress.py batch zip_folder/ -o out_dir/ --resume
 ```
 
 ## Output modes
@@ -65,8 +65,8 @@ Types occurring once are stored as a single object. Types occurring more than on
 Standards-compliant JSON-LD with `@context`, `@type`, `@id` wrappers, and typed values preserved exactly as rdflib serialises them. Can be loaded by any JSON-LD processor and converted back to RDF.
 
 ```bash
-uv run rdfxml2jsonl.py single input.xml --jsonld
-uv run rdfxml2jsonl.py batch input_dir/ -o output.jsonl.gz --jsonld
+uv run rdfpress.py single input.xml --jsonld
+uv run rdfpress.py batch input_dir/ -o output.jsonl.gz --jsonld
 ```
 
 ## Commands
@@ -76,7 +76,7 @@ uv run rdfxml2jsonl.py batch input_dir/ -o output.jsonl.gz --jsonld
 Convert a single RDF/XML file.
 
 ```
-uv run rdfxml2jsonl.py single [OPTIONS] INPUT_FILE
+uv run rdfpress.py single [OPTIONS] INPUT_FILE
 ```
 
 | Option | Description |
@@ -94,7 +94,7 @@ When given a directory of zip files (no XML files matching the glob pattern), ea
 Parsing is parallelised across files (or across zip archives in multi-zip mode) using a configurable number of workers.
 
 ```
-uv run rdfxml2jsonl.py batch [OPTIONS] INPUT_PATH
+uv run rdfpress.py batch [OPTIONS] INPUT_PATH
 ```
 
 | Option | Description |
@@ -112,11 +112,11 @@ Each input file becomes one JSON line in the output. A `_source_file` field is a
 The script is importable as a Python module:
 
 ```bash
-pip install git+https://github.com/youruser/rdfxml2jsonl.git
+pip install git+https://github.com/youruser/rdfpress.git
 ```
 
 ```python
-from rdfxml2jsonl import parse_rdfxml
+from rdfpress import parse_rdfxml
 
 # Simplified JSON
 data = parse_rdfxml("input.xml")

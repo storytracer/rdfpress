@@ -10,7 +10,7 @@
 # ]
 # ///
 """
-rdfxml2jsonl — Bulk-convert RDF/XML to queryable JSONL or JSON-LD.
+rdfpress — Bulk-convert RDF/XML to queryable JSONL or JSON-LD.
 
 Parses RDF/XML files using rdflib and outputs either simplified JSON
 for efficient bulk processing, or standards-compliant JSON-LD suitable
@@ -46,11 +46,11 @@ JSON-LD (--jsonld):
     file's own xmlns namespace declarations.
 
 Usage:
-    uv run rdfxml2jsonl.py single input.xml
-    uv run rdfxml2jsonl.py single input.xml --jsonld
-    uv run rdfxml2jsonl.py batch  input_dir/ -o output.jsonl.gz
-    uv run rdfxml2jsonl.py batch  archive.zip -o output.jsonl.gz --jsonld
-    uv run rdfxml2jsonl.py batch  zip_folder/ -o out_dir/ -w 8
+    uv run rdfpress.py single input.xml
+    uv run rdfpress.py single input.xml --jsonld
+    uv run rdfpress.py batch  input_dir/ -o output.jsonl.gz
+    uv run rdfpress.py batch  archive.zip -o output.jsonl.gz --jsonld
+    uv run rdfpress.py batch  zip_folder/ -o out_dir/ -w 8
 """
 
 import dataclasses
