@@ -490,14 +490,16 @@ def _batch_from_zips(
     stats = BatchStats()
 
     out_dir.mkdir(parents=True, exist_ok=True)
+    jsonl_dir = out_dir / "jsonl"
+    jsonl_dir.mkdir(parents=True, exist_ok=True)
 
     # --- Phase 0: filter (resume) and clean stale intermediates ---
     to_process: list[tuple[Path, str]] = []
 
     for zp, stem in zip_stems:
-        # Clean stale intermediate / tmp files
+        # Clean stale intermediate / tmp files from jsonl subdir
         for stale_suffix in (".jsonl.tmp", ".jsonl"):
-            stale = out_dir / f"{stem}{stale_suffix}"
+            stale = jsonl_dir / f"{stem}{stale_suffix}"
             if stale.exists():
                 stale.unlink()
         if resume and _stem_complete(stem, out_dir, formats):
@@ -554,8 +556,8 @@ def _batch_from_zips(
             ]
 
             # 1c. Process chunks → write uncompressed JSONL intermediate -
-            tmp_path = out_dir / f"{stem}.jsonl.tmp"
-            jsonl_path = out_dir / f"{stem}.jsonl"
+            tmp_path = jsonl_dir / f"{stem}.jsonl.tmp"
+            jsonl_path = jsonl_dir / f"{stem}.jsonl"
             current_tmp = tmp_path
             row = ZipRow(stem=stem)
             zp_str = str(zp)
@@ -625,7 +627,8 @@ def _batch_from_zips(
                 row.produced = _export_formats(
                     jsonl_path, stem, out_dir, formats, compresslevel,
                 )
-                jsonl_path.unlink()
+                if "jsonl" not in formats:
+                    jsonl_path.unlink()
                 row.elapsed = time.monotonic() - t0
 
             except Exception as exc:
@@ -658,6 +661,10 @@ def _batch_from_zips(
         if pool is not None:
             pool.shutdown(wait=False, cancel_futures=True)
 
+    # Remove jsonl subdir if it was only used for intermediates
+    if "jsonl" not in formats and jsonl_dir.exists() and not any(jsonl_dir.iterdir()):
+        jsonl_dir.rmdir()
+
     return stats
 
 
@@ -676,8 +683,10 @@ def _batch_single(
     success, failed = 0, 0
 
     out_dir.mkdir(parents=True, exist_ok=True)
-    tmp_path = out_dir / f"{stem}.jsonl.tmp"
-    jsonl_path = out_dir / f"{stem}.jsonl"
+    jsonl_dir = out_dir / "jsonl"
+    jsonl_dir.mkdir(parents=True, exist_ok=True)
+    tmp_path = jsonl_dir / f"{stem}.jsonl.tmp"
+    jsonl_path = jsonl_dir / f"{stem}.jsonl"
 
     errors: list[str] = []
 
@@ -725,7 +734,10 @@ def _batch_single(
 
     # Export to requested formats
     produced = _export_formats(jsonl_path, stem, out_dir, formats, compresslevel)
-    jsonl_path.unlink()
+    if "jsonl" not in formats:
+        jsonl_path.unlink()
+        if jsonl_dir.exists() and not any(jsonl_dir.iterdir()):
+            jsonl_dir.rmdir()
 
     console.print()
     console.print(
@@ -807,9 +819,9 @@ def _export_formats(
         fmt_dir = out_dir / fmt
         fmt_dir.mkdir(parents=True, exist_ok=True)
         if fmt == "jsonl":
-            dest = fmt_dir / f"{stem}.jsonl"
-            shutil.copy2(jsonl_path, dest)
-            produced[fmt] = dest
+            # Intermediate is already written to jsonl_dir; just record it
+            produced[fmt] = jsonl_path
+            continue
         elif fmt == "jsonl.gz":
             dest = fmt_dir / f"{stem}.jsonl.gz"
             _compress_gzip(jsonl_path, dest, compresslevel)
