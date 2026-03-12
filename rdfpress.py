@@ -10,6 +10,7 @@
 #     "fsspec>=2026.2.0",
 #     "orjson>=3.10",
 #     "duckdb>=1.0",
+#     "humanfriendly>=10.0",
 # ]
 # ///
 """
@@ -87,6 +88,7 @@ import fsspec
 from fsspec.implementations.local import LocalFileSystem
 
 import click
+import humanfriendly
 from rdflib import Graph
 from rdflib.plugins.serializers.jsonld import from_rdf
 from rich.console import Console
@@ -931,6 +933,7 @@ def _batch_from_zips_remote(
 # CLI
 # ---------------------------------------------------------------------------
 
+
 @click.group()
 def cli():
     """Convert RDF/XML to queryable JSONL, Parquet, or standards-compliant JSON-LD."""
@@ -965,9 +968,11 @@ def single(input_file: str, output: str | None, jsonld: bool):
 @click.option("--resume", is_flag=True, default=True, help="Skip zips whose output already exists.")
 @click.option("--cache-dir", type=click.Path(), default=None,
               help="Cache directory for remote downloads. [default: <output>/.cache]")
+@click.option("--block-size", type=str, default="8MB",
+              help="Read buffer size for remote transfers (e.g. 1MB, 8MB, 64KB). [default: 8MB]")
 def batch(input_path: str, output: str | None, formats: str, jsonld: bool,
           pattern: str, workers: int, compresslevel: int, resume: bool,
-          cache_dir: str | None):
+          cache_dir: str | None, block_size: str):
     """
     Convert many RDF/XML files to JSONL, gzipped JSONL, and/or Parquet.
 
@@ -987,6 +992,7 @@ def batch(input_path: str, output: str | None, formats: str, jsonld: bool,
     Use --jsonld for standards-compliant JSON-LD output.
     """
     workers = max(1, workers if workers is not None else os.cpu_count() or 4)
+    block_size_bytes = humanfriendly.parse_size(block_size, binary=True)
 
     # --- Parse and validate formats ---
     format_list = [f.strip() for f in formats.split(",")]
@@ -998,7 +1004,7 @@ def batch(input_path: str, output: str | None, formats: str, jsonld: bool,
 
     # --- Resolve input via fsspec (handles local paths and remote URLs) ---
     try:
-        fs, root = fsspec.url_to_fs(input_path, block_size=2**23)
+        fs, root = fsspec.url_to_fs(input_path, block_size=block_size_bytes)
     except Exception as exc:
         err_console.print(f"[red]Error:[/] cannot open {input_path}: {exc}")
         sys.exit(1)
