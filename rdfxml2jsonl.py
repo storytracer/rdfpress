@@ -822,8 +822,12 @@ def batch(input_path: str, output: str | None, formats: str, jsonld: bool,
 
     # --- Directory input ---
     if fs.isdir(root):
+        raw_ls = fs.ls(root, detail=False)
+        root_prefix = root.rstrip("/") + "/"
         zip_files = sorted(
-            p for p in fs.ls(root, detail=False) if p.endswith(".zip")
+            p if p.startswith(root_prefix)
+            else root_prefix + p.rsplit("/", 1)[-1]
+            for p in raw_ls if p.endswith(".zip")
         )
 
         if is_local:
