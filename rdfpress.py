@@ -998,7 +998,7 @@ def batch(input_path: str, output: str | None, formats: str, jsonld: bool,
 
     # --- Resolve input via fsspec (handles local paths and remote URLs) ---
     try:
-        fs, root = fsspec.url_to_fs(input_path, block_size=2**20)
+        fs, root = fsspec.url_to_fs(input_path, block_size=2**23)
     except Exception as exc:
         err_console.print(f"[red]Error:[/] cannot open {input_path}: {exc}")
         sys.exit(1)
