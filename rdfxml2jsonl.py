@@ -56,6 +56,7 @@ import gzip
 import os
 import orjson
 import logging
+import shutil
 import sys
 import zipfile
 from io import BytesIO
@@ -308,9 +309,11 @@ def _parse_chunk(
 # ---------------------------------------------------------------------------
 
 def _batch_from_zips(
-    zip_outputs: list[tuple[Path, Path]],
+    zip_stems: list[tuple[Path, str]],
+    out_dir: Path,
+    formats: list[str],
     jsonld: bool, pattern: str, workers: int,
-    compresslevel: int = 1, resume: bool = False,
+    compresslevel: int = 6, resume: bool = False,
 ):
     """Process zip files sequentially with parallel chunk parsing within each.
 
@@ -318,32 +321,40 @@ def _batch_from_zips(
     bounds memory and open file handles to O(1 zip) regardless of batch
     size, while keeping all CPU cores saturated via adaptive chunking.
 
+    An uncompressed JSONL intermediate is always written first, then
+    converted to each requested output format (jsonl, jsonl.gz, parquet).
+    Output is stored in per-format subdirectories under *out_dir*.
+
     Args:
-        zip_outputs: (zip_path, output_path) pairs — one .jsonl.gz per zip.
-        jsonld:      Output valid JSON-LD instead of simplified JSON.
-        pattern:     Glob pattern for matching entries (e.g. ``"*.xml"``).
-        workers:     Number of parallel workers.
-        resume:      Skip zips whose output already exists.
+        zip_stems:    (zip_path, stem) pairs — stem used for output filenames.
+        out_dir:      Root output directory (format subdirs created inside).
+        formats:      Requested output formats (e.g. ``["jsonl.gz", "parquet"]``).
+        jsonld:       Output valid JSON-LD instead of simplified JSON.
+        pattern:      Glob pattern for matching entries (e.g. ``"*.xml"``).
+        workers:      Number of parallel workers.
+        compresslevel: Gzip compression level for jsonl.gz output.
+        resume:       Skip zips whose outputs already exist.
     """
     suffix = pattern.replace("*", "")  # e.g. "*.xml" -> ".xml"
     pool_size = max(1, workers)
-    n_total = len(zip_outputs)
+    n_total = len(zip_stems)
 
-    # --- Phase 0: filter (resume) and clean stale .tmp files ---
-    to_process: list[tuple[Path, Path]] = []
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    # --- Phase 0: filter (resume) and clean stale intermediates ---
+    to_process: list[tuple[Path, str]] = []
     skipped_resume = 0
 
-    for zp, out in zip_outputs:
-        out.parent.mkdir(parents=True, exist_ok=True)
-        tmp = Path(str(out) + ".tmp")
-        if tmp.exists():
-            tmp.unlink()
-        if resume and out.exists():
+    for zp, stem in zip_stems:
+        # Clean stale intermediate / tmp files
+        for stale_suffix in (".jsonl.tmp", ".jsonl"):
+            stale = out_dir / f"{stem}{stale_suffix}"
+            if stale.exists():
+                stale.unlink()
+        if resume and _stem_complete(stem, out_dir, formats):
             skipped_resume += 1
             continue
-        to_process.append((zp, out))
-
-
+        to_process.append((zp, stem))
 
     if skipped_resume:
         click.echo(f"Resuming: skipped {skipped_resume} already-completed zip(s).")
@@ -364,7 +375,7 @@ def _batch_from_zips(
     )
 
     try:
-        for zip_idx, (zp, out) in enumerate(to_process, 1):
+        for zip_idx, (zp, stem) in enumerate(to_process, 1):
             # 1a. Read central directory --------------------------------
             try:
                 zf_handle = zipfile.ZipFile(zp, "r")
@@ -394,8 +405,9 @@ def _batch_from_zips(
                 for i in range(0, len(members), chunk_size)
             ]
 
-            # 1c. Process chunks → write to .tmp ------------------------
-            tmp_path = Path(str(out) + ".tmp")
+            # 1c. Process chunks → write uncompressed JSONL intermediate -
+            tmp_path = out_dir / f"{stem}.jsonl.tmp"
+            jsonl_path = out_dir / f"{stem}.jsonl"
             current_tmp = tmp_path
             ok, fail = 0, 0
             zp_str = str(zp)
@@ -404,9 +416,7 @@ def _batch_from_zips(
             )
 
             try:
-                with gzip.open(
-                    str(tmp_path), "wt", encoding="utf-8", compresslevel=compresslevel,
-                ) as gz:
+                with open(tmp_path, "w", encoding="utf-8") as f:
                     if pool is None:
                         # Sequential (workers=1)
                         for chunk_names in tqdm(
@@ -415,8 +425,8 @@ def _batch_from_zips(
                             results = _parse_chunk(zp_str, chunk_names, jsonld)
                             for _n, line, error in results:
                                 if line is not None:
-                                    gz.write(line)
-                                    gz.write("\n")
+                                    f.write(line)
+                                    f.write("\n")
                                     ok += 1
                                 else:
                                     tqdm.write(f"  FAILED: {error}")
@@ -446,31 +456,42 @@ def _batch_from_zips(
 
                                 for _n, line, error in results:
                                     if line is not None:
-                                        gz.write(line)
-                                        gz.write("\n")
+                                        f.write(line)
+                                        f.write("\n")
                                         ok += 1
                                     else:
                                         tqdm.write(f"  FAILED: {error}")
                                         fail += 1
                                 pbar.update(len(results))
 
-                # 1d. Atomic rename on success --------------------------
-                tmp_path.rename(out)
+                # 1d. Atomic rename of intermediate ----------------------
+                tmp_path.rename(jsonl_path)
                 current_tmp = None
+
+                # 1e. Export to requested formats -------------------------
+                produced = _export_formats(
+                    jsonl_path, stem, out_dir, formats, compresslevel,
+                )
+                jsonl_path.unlink()
 
             except Exception as exc:
                 tqdm.write(f"  ZIP ERROR {zp.name}: {exc}")
                 if tmp_path.exists():
                     tmp_path.unlink()
+                if jsonl_path.exists():
+                    jsonl_path.unlink()
                 current_tmp = None
                 skipped_bad += 1
                 continue
 
-            # 1e. Per-zip summary ---------------------------------------
-            size_mb = out.stat().st_size / (1024 * 1024)
+            # 1f. Per-zip summary ---------------------------------------
+            fmt_sizes = ", ".join(
+                f"{fmt} {p.stat().st_size / (1024 * 1024):.1f} MB"
+                for fmt, p in produced.items()
+            )
             tqdm.write(
-                f"  => {out.name}: {ok:,} ok, {fail:,} failed "
-                f"({size_mb:.1f} MB)"
+                f"  => {stem}: {ok:,} ok, {fail:,} failed "
+                f"({fmt_sizes})"
             )
             grand_ok += ok
             grand_fail += fail
@@ -502,20 +523,30 @@ def _batch_from_zips(
 
 
 def _batch_single(
-    entries: list[tuple[str, str | bytes]], output: str,
-    jsonld: bool, workers: int, compresslevel: int = 1,
+    entries: list[tuple[str, str | bytes]],
+    stem: str, out_dir: Path,
+    formats: list[str],
+    jsonld: bool, workers: int, compresslevel: int = 6,
 ):
-    """Parse a list of (name, source) entries into a single .jsonl.gz."""
+    """Parse a list of (name, source) entries into output files.
+
+    Writes an uncompressed JSONL intermediate first, then converts to each
+    requested format (jsonl, jsonl.gz, parquet) in per-format subdirectories.
+    """
     pool_size = min(workers, len(entries))
     success, failed = 0, 0
 
-    with gzip.open(output, "wt", encoding="utf-8", compresslevel=compresslevel) as gz:
+    out_dir.mkdir(parents=True, exist_ok=True)
+    tmp_path = out_dir / f"{stem}.jsonl.tmp"
+    jsonl_path = out_dir / f"{stem}.jsonl"
+
+    with open(tmp_path, "w", encoding="utf-8") as f:
         if pool_size <= 1:
             for name, source in tqdm(entries, desc="Converting", unit="file"):
                 try:
                     data = parse_rdfxml(source, jsonld=jsonld)
-                    gz.write(orjson.dumps(data).decode())
-                    gz.write("\n")
+                    f.write(orjson.dumps(data).decode())
+                    f.write("\n")
                     success += 1
                 except Exception as e:
                     tqdm.write(f"FAILED: {name} — {e}")
@@ -530,20 +561,107 @@ def _batch_single(
                     for fut in as_completed(futures):
                         name, line, error = fut.result()
                         if line is not None:
-                            gz.write(line)
-                            gz.write("\n")
+                            f.write(line)
+                            f.write("\n")
                             success += 1
                         else:
                             tqdm.write(f"FAILED: {error}")
                             failed += 1
                         pbar.update(1)
 
-    click.echo(f"\nWrote {output}")
-    click.echo(f"  {success} converted, {failed} failed out of {len(entries)} files.")
+    tmp_path.rename(jsonl_path)
 
-    if success > 0:
-        size_mb = Path(output).stat().st_size / (1024 * 1024)
-        click.echo(f"  File size: {size_mb:.1f} MB")
+    # Export to requested formats
+    produced = _export_formats(jsonl_path, stem, out_dir, formats, compresslevel)
+    jsonl_path.unlink()
+
+    click.echo(f"\n  {success} converted, {failed} failed out of {len(entries)} files.")
+    if produced:
+        for fmt, p in produced.items():
+            size_mb = p.stat().st_size / (1024 * 1024)
+            click.echo(f"  {fmt}: {p} ({size_mb:.1f} MB)")
+
+
+# ---------------------------------------------------------------------------
+# Multi-format export helpers
+# ---------------------------------------------------------------------------
+
+_FMT_EXT = {"jsonl": ".jsonl", "jsonl.gz": ".jsonl.gz", "parquet": ".parquet"}
+
+
+def _stem_complete(stem: str, out_dir: Path, formats: list[str]) -> bool:
+    """Check whether all requested format outputs exist for a given stem."""
+    return all(
+        (out_dir / fmt / f"{stem}{_FMT_EXT[fmt]}").exists()
+        for fmt in formats
+    )
+
+
+def _to_parquet(jsonl_path: Path, parquet_path: Path) -> None:
+    """Convert an uncompressed JSONL file to Parquet via DuckDB."""
+    try:
+        import duckdb
+    except ImportError:
+        raise click.ClickException(
+            "DuckDB is required for Parquet output. "
+            "Install it with:  uv pip install duckdb"
+        )
+    if jsonl_path.stat().st_size == 0:
+        return
+    tmp = parquet_path.with_suffix(".parquet.tmp")
+    try:
+        src = str(jsonl_path).replace("'", "''")
+        dst = str(tmp).replace("'", "''")
+        duckdb.sql(
+            f"COPY (SELECT COLUMNS(*)::JSON[] FROM read_json('{src}', "
+            f"maximum_depth=1, sample_size=-1, union_by_name=true)) "
+            f"TO '{dst}' (FORMAT PARQUET)"
+        )
+        tmp.rename(parquet_path)
+    except Exception:
+        if tmp.exists():
+            tmp.unlink()
+        raise
+
+
+def _compress_gzip(src: Path, dst: Path, compresslevel: int) -> None:
+    """Gzip-compress *src* to *dst* with atomic write."""
+    tmp = Path(str(dst) + ".tmp")
+    try:
+        with open(src, "rb") as f_in, gzip.open(tmp, "wb", compresslevel=compresslevel) as f_out:
+            shutil.copyfileobj(f_in, f_out)
+        tmp.rename(dst)
+    except Exception:
+        if tmp.exists():
+            tmp.unlink()
+        raise
+
+
+def _export_formats(
+    jsonl_path: Path, stem: str, out_dir: Path,
+    formats: list[str], compresslevel: int,
+) -> dict[str, Path]:
+    """Produce each requested format from the uncompressed JSONL intermediate.
+
+    Returns dict mapping format name to output path.
+    """
+    produced: dict[str, Path] = {}
+    for fmt in formats:
+        fmt_dir = out_dir / fmt
+        fmt_dir.mkdir(parents=True, exist_ok=True)
+        if fmt == "jsonl":
+            dest = fmt_dir / f"{stem}.jsonl"
+            shutil.copy2(jsonl_path, dest)
+            produced[fmt] = dest
+        elif fmt == "jsonl.gz":
+            dest = fmt_dir / f"{stem}.jsonl.gz"
+            _compress_gzip(jsonl_path, dest, compresslevel)
+            produced[fmt] = dest
+        elif fmt == "parquet":
+            dest = fmt_dir / f"{stem}.parquet"
+            _to_parquet(jsonl_path, dest)
+            produced[fmt] = dest
+    return produced
 
 
 # ---------------------------------------------------------------------------
@@ -555,6 +673,7 @@ def _batch_from_zips_remote(
     zip_paths: list[str],
     out_dir: Path,
     cache_dir: Path,
+    formats: list[str],
     jsonld: bool,
     pattern: str,
     workers: int,
@@ -576,11 +695,10 @@ def _batch_from_zips_remote(
         for idx, remote_zip in enumerate(zip_paths, 1):
             zip_name = remote_zip.rsplit("/", 1)[-1]
             stem = zip_name.rsplit(".", 1)[0]
-            local_output = out_dir / f"{stem}.jsonl.gz"
             cached_zip = cache_dir / zip_name
 
-            # Resume: skip if output already exists
-            if resume and local_output.exists():
+            # Resume: skip if all format outputs already exist
+            if resume and _stem_complete(stem, out_dir, formats):
                 skipped_resume += 1
                 continue
 
@@ -601,7 +719,8 @@ def _batch_from_zips_remote(
                 click.echo(f"[{idx}/{n}] Using cached {zip_name}")
 
             _batch_from_zips(
-                [(cached_zip, local_output)],
+                [(cached_zip, stem)],
+                out_dir, formats,
                 jsonld, pattern, workers, compresslevel, resume=False,
             )
 
@@ -644,18 +763,21 @@ def single(input_file: str, output: str | None, jsonld: bool):
 @cli.command()
 @click.argument("input_path", type=str)
 @click.option("-o", "--output", type=click.Path(), default=None,
-              help="Output file (single source) or directory (folder of zips).")
+              help="Output directory. Per-format subdirectories are created inside.")
+@click.option("--format", "formats", type=str, default="jsonl.gz",
+              help="Comma-separated output formats: jsonl, jsonl.gz, parquet. [default: jsonl.gz]")
 @click.option("--jsonld", is_flag=True, help="Output valid JSON-LD instead of simplified JSON.")
 @click.option("--glob", "pattern", type=str, default="*.xml", help="File glob pattern. [default: *.xml]")
 @click.option("-w", "--workers", type=int, default=None, help="Parallel workers. [default: number of CPUs]")
-@click.option("--compresslevel", type=click.IntRange(0, 9), default=6, help="Gzip compression level (0=none, 9=max). [default: 1]")
+@click.option("--compresslevel", type=click.IntRange(0, 9), default=6, help="Gzip compression level (0=none, 9=max). [default: 6]")
 @click.option("--resume", is_flag=True, help="Skip zips whose output already exists.")
 @click.option("--cache-dir", type=click.Path(), default=None,
               help="Cache directory for remote downloads. [default: <output>/.cache]")
-def batch(input_path: str, output: str | None, jsonld: bool, pattern: str,
-          workers: int, compresslevel: int, resume: bool, cache_dir: str | None):
+def batch(input_path: str, output: str | None, formats: str, jsonld: bool,
+          pattern: str, workers: int, compresslevel: int, resume: bool,
+          cache_dir: str | None):
     """
-    Convert many RDF/XML files to gzipped JSONL.
+    Convert many RDF/XML files to JSONL, gzipped JSONL, and/or Parquet.
 
     INPUT_PATH can be a local path or any fsspec-compatible URL
     (ftp://user:pass@host/path/, s3://bucket/prefix/, …).
@@ -663,13 +785,36 @@ def batch(input_path: str, output: str | None, jsonld: bool, pattern: str,
     Accepts a directory of XML files, a .zip archive, or a directory
     of .zip archives.  For a single source every input file becomes
     one JSON line in a single output.  For multiple zips each archive
-    produces its own .jsonl.gz file.
+    produces its own output file.
+
+    Output is stored in per-format subdirectories (e.g. out/jsonl.gz/,
+    out/parquet/).  Use --format to select one or more formats.
 
     Credentials for remote storage are embedded in the URL.
 
     Use --jsonld for standards-compliant JSON-LD output.
     """
     workers = max(1, workers if workers is not None else os.cpu_count() or 4)
+
+    # --- Parse and validate formats ---
+    format_list = [f.strip() for f in formats.split(",")]
+    valid_formats = {"jsonl", "jsonl.gz", "parquet"}
+    if bad := set(format_list) - valid_formats:
+        click.echo(f"Error: unknown format(s): {', '.join(bad)}", err=True)
+        click.echo(f"Valid formats: {', '.join(sorted(valid_formats))}", err=True)
+        sys.exit(1)
+
+    # Early check: parquet requires duckdb
+    if "parquet" in format_list:
+        try:
+            import duckdb  # noqa: F401
+        except ImportError:
+            click.echo(
+                "Error: DuckDB is required for Parquet output. "
+                "Install it with:  uv pip install duckdb",
+                err=True,
+            )
+            sys.exit(1)
 
     # --- Resolve input via fsspec (handles local paths and remote URLs) ---
     try:
@@ -695,11 +840,14 @@ def batch(input_path: str, output: str | None, jsonld: bool, pattern: str,
 
             if not entries and zip_files:
                 out_dir = Path(output) if output else Path(root)
-                zip_outputs = [
-                    (Path(zf), out_dir / (Path(zf).stem + ".jsonl.gz"))
+                zip_stems = [
+                    (Path(zf), Path(zf).stem)
                     for zf in zip_files
                 ]
-                _batch_from_zips(zip_outputs, jsonld, pattern, workers, compresslevel, resume=resume)
+                _batch_from_zips(
+                    zip_stems, out_dir, format_list,
+                    jsonld, pattern, workers, compresslevel, resume=resume,
+                )
                 return
 
             if not entries:
@@ -710,9 +858,12 @@ def batch(input_path: str, output: str | None, jsonld: bool, pattern: str,
                 )
                 sys.exit(1)
 
-            if output is None:
-                output = str(Path(root).with_suffix(".jsonl.gz"))
-            _batch_single(entries, output, jsonld, workers, compresslevel)
+            out_dir = Path(output) if output else Path(root).parent
+            stem = Path(root).name
+            _batch_single(
+                entries, stem, out_dir, format_list,
+                jsonld, workers, compresslevel,
+            )
             return
 
         else:
@@ -729,17 +880,18 @@ def batch(input_path: str, output: str | None, jsonld: bool, pattern: str,
             c_dir = Path(cache_dir) if cache_dir else out_dir / ".cache"
             _batch_from_zips_remote(
                 fs, zip_files, out_dir, c_dir,
-                jsonld, pattern, workers, compresslevel, resume,
+                format_list, jsonld, pattern, workers, compresslevel, resume,
             )
             return
 
     # --- Single zip input ---
     if root.endswith(".zip") and fs.isfile(root):
         if is_local:
-            if output is None:
-                output = str(Path(root).with_suffix(".jsonl.gz"))
+            out_dir = Path(output) if output else Path(root).parent
+            stem = Path(root).stem
             _batch_from_zips(
-                [(Path(root), Path(output))],
+                [(Path(root), stem)],
+                out_dir, format_list,
                 jsonld, pattern, workers, compresslevel, resume=resume,
             )
         else:
@@ -748,7 +900,7 @@ def batch(input_path: str, output: str | None, jsonld: bool, pattern: str,
             c_dir = Path(cache_dir) if cache_dir else out_dir / ".cache"
             _batch_from_zips_remote(
                 fs, [root], out_dir, c_dir,
-                jsonld, pattern, workers, compresslevel, resume,
+                format_list, jsonld, pattern, workers, compresslevel, resume,
             )
         return
 

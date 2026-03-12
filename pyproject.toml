@@ -13,6 +13,9 @@ dependencies = [
     "orjson>=3.10",
 ]
 
+[project.optional-dependencies]
+parquet = ["duckdb>=1.0"]
+
 [project.scripts]
 rdfxml2jsonl = "rdfxml2jsonl:cli"
 
