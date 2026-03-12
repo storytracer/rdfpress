@@ -1,8 +1,45 @@
 # rdfpress
 
-Bulk-convert RDF/XML files to queryable JSONL, Parquet, or standards-compliant JSON-LD.
+**Turn RDF/XML into something you can actually query.**
 
-Parses RDF/XML using [rdflib](https://rdflib.readthedocs.io/) and outputs either **simplified JSON** optimised for analytical querying, or **valid JSON-LD** suitable for RDF pipelines. Handles single files, directories, zip archives, and remote sources via [fsspec](https://filesystem-spec.readthedocs.io/).
+RDF/XML is the standard serialization for linked data, but it's notoriously difficult to work with using everyday data tools. rdfpress converts RDF/XML files into clean JSONL, Parquet, or JSON-LD so you can query them directly with DuckDB, Pandas, Polars, jq, or any JSON-friendly tool — no SPARQL endpoint required.
+
+It handles single files, directories full of XML, zip archives, and even remote sources over FTP or S3. Processing is parallelized and memory-efficient, so it scales from a single record to thousands of large zip archives.
+
+## Examples
+
+**Convert a single file and inspect the output:**
+
+```bash
+uv run rdfpress.py single record.xml
+# → record.json (simplified, directly queryable)
+```
+
+**Bulk-convert a folder of zip archives to Parquet for analysis:**
+
+```bash
+uv run rdfpress.py batch downloads/ -o out/ --format parquet -w 8
+# → out/parquet/*.parquet (one file per zip, 8 parallel workers)
+```
+
+**Query the result with DuckDB — no setup, no loading step:**
+
+```sql
+SELECT * FROM 'out/parquet/data.parquet' WHERE "dc:title" IS NOT NULL LIMIT 10;
+```
+
+**Pull remote files directly from an FTP server:**
+
+```bash
+uv run rdfpress.py batch ftp://user:pass@data.example.org/exports/ -o out/
+```
+
+**Need standards-compliant JSON-LD instead?** Add `--jsonld` to preserve full RDF semantics:
+
+```bash
+uv run rdfpress.py single record.xml --jsonld
+# → record.jsonld (valid JSON-LD, round-trippable to RDF)
+```
 
 ## Installation
 
