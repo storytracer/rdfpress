@@ -181,8 +181,7 @@ def rekey_by_type(data: dict) -> dict:
     Restructure a JSON-LD document by replacing the flat @graph array
     with a dict keyed by each node's @type.
 
-    - Single-occurrence types  -> stored as an object
-    - Multi-occurrence types   -> stored as an array
+    - Each type's nodes are stored as an array
     - Nodes without @type      -> collected under "_untyped"
     - Nodes with multiple types appear under each type key
 

@@ -11,7 +11,7 @@ Requires [uv](https://docs.astral.sh/uv/). No manual dependency installation nee
 Alternatively, install as a package for library or CLI use:
 
 ```bash
-pip install git+https://github.com/youruser/rdfpress.git
+pip install git+https://github.com/storytracer/rdfpress.git
 ```
 
 ## Quick start
@@ -38,8 +38,8 @@ uv run rdfpress.py batch archive.zip -o out_dir/ --format jsonl.gz,parquet
 # Remote zips via FTP (or any fsspec-supported URL)
 uv run rdfpress.py batch ftp://user:pass@host/path/ -o out_dir/
 
-# Resume after interruption (skips already-completed zips)
-uv run rdfpress.py batch zip_folder/ -o out_dir/ --resume
+# Disable automatic resume (re-process all zips, even completed ones)
+uv run rdfpress.py batch zip_folder/ -o out_dir/ --no-resume
 ```
 
 ## Output modes
@@ -59,7 +59,7 @@ Transformations applied:
 | `@type` inside nodes | *(removed)* | Redundant with grouping key |
 | `@context` | *(removed)* | Prefixes baked into keys |
 
-Types occurring once are stored as an array. Nodes without `@type` are grouped under `_untyped`.
+Each type's nodes are stored as an array. Nodes without `@type` are grouped under `_untyped`.
 
 > **Note:** This is a one-way transformation. The output is not valid JSON-LD and cannot be round-tripped back to RDF.
 
@@ -110,7 +110,7 @@ uv run rdfpress.py batch [OPTIONS] INPUT_PATH
 The script is importable as a Python module:
 
 ```bash
-pip install git+https://github.com/youruser/rdfpress.git
+pip install git+https://github.com/storytracer/rdfpress.git
 ```
 
 ```python

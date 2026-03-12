@@ -44,4 +44,4 @@ Key functions:
 - No test suite currently exists
 - `rdflib.term` logger is silenced at ERROR level (noisy but harmless warnings about XSD type conversions)
 - Batch output uses atomic write pattern: write to `.tmp`, rename on success
-- `--resume` flag enables crash recovery by skipping zips with existing output files
+- `--resume` flag (enabled by default) provides crash recovery by skipping zips with existing output files
