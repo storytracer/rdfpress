@@ -83,20 +83,61 @@ uv run rdfpress.py batch zip_folder/ -o out_dir/ --no-resume
 
 ### Simplified JSON (default)
 
-Optimised for analytical querying in tools like DuckDB, jq, Pandas, or Polars. The output is structured for direct access by RDF type — no need to unnest or filter arrays.
+JSON-LD is verbose by design — every value is wrapped in metadata containers like `{"@id": "..."}` or `{"@value": 42, "@type": "xsd:long"}`, and all nodes sit in a flat `@graph` array regardless of type. This is great for RDF processors but painful for data analysis: you can't just `SELECT *` or load it into a DataFrame without significant post-processing.
 
-Transformations applied:
+Simplified mode strips that ceremony. It groups nodes by their RDF type, unwraps value containers to native JSON types, and drops metadata that becomes redundant after restructuring. The result is compact JSON you can query directly.
 
-| Input | Output | Rationale |
-|---|---|---|
-| `@graph` array | Top-level keys per `@type` | Direct column access by type |
-| `{"@id": "http://..."}` | `"http://..."` | Plain string, no wrapper |
-| `{"@value": 42, "@type": "xsd:long"}` | `42` | Native JSON type |
-| `{"@value": "x", "@language": "en"}` | *(unchanged)* | Language tag is meaningful |
-| `@type` inside nodes | *(removed)* | Redundant with grouping key |
-| `@context` | *(removed)* | Prefixes baked into keys |
+**Before (JSON-LD):**
 
-Each type's nodes are stored as an array. Nodes without `@type` are grouped under `_untyped`.
+```json
+{
+  "@context": { "dc": "http://purl.org/dc/elements/1.1/", "edm": "http://www.europeana.eu/schemas/edm/" },
+  "@graph": [
+    {
+      "@id": "http://example.org/item/123",
+      "@type": "edm:ProvidedCHO",
+      "dc:title": { "@value": "Mona Lisa", "@language": "en" },
+      "dc:date": { "@value": 1503, "@type": "xsd:int" },
+      "dc:creator": { "@id": "http://example.org/agent/davinci" }
+    },
+    {
+      "@id": "http://example.org/agent/davinci",
+      "@type": "edm:Agent",
+      "skos:prefLabel": { "@value": "Leonardo da Vinci", "@language": "en" }
+    }
+  ]
+}
+```
+
+**After (simplified):**
+
+```json
+{
+  "edm:ProvidedCHO": [
+    {
+      "@id": "http://example.org/item/123",
+      "dc:title": { "@value": "Mona Lisa", "@language": "en" },
+      "dc:date": 1503,
+      "dc:creator": "http://example.org/agent/davinci"
+    }
+  ],
+  "edm:Agent": [
+    {
+      "@id": "http://example.org/agent/davinci",
+      "skos:prefLabel": { "@value": "Leonardo da Vinci", "@language": "en" }
+    }
+  ]
+}
+```
+
+What changed:
+
+- **`@graph` array → grouped by `@type`** — each type is a top-level key, so you can access e.g. all agents directly without filtering.
+- **`{"@id": "http://..."}` → `"http://..."`** — URI references become plain strings.
+- **`{"@value": 1503, "@type": "xsd:int"}` → `1503`** — typed literals become native JSON values.
+- **Language-tagged strings are kept as-is** — `{"@value": "...", "@language": "en"}` stays, because the language tag carries meaningful information.
+- **`@type` removed from each node** — it's redundant with the grouping key.
+- **`@context` removed** — namespace prefixes are already baked into the property names.
 
 > **Note:** This is a one-way transformation. The output is not valid JSON-LD and cannot be round-tripped back to RDF.
 
